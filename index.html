@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hostlinku Streaming Chat</title>
+<style>
+  body { max-width: 42rem; margin: 3rem auto; padding: 0 1rem; font: 1rem/1.55 system-ui; color-scheme: light dark; }
+  textarea, button { box-sizing: border-box; font: inherit; display: block; margin: .5rem 0; padding: .65rem; }
+  textarea { width: 100%; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+</style>
+<main>
+  <h1>Hostlinku Streaming Chat</h1>
+  <p>Send one prompt and watch the text arrive as the model generates it.</p>
+  <form>
+    <label for="prompt">Prompt</label>
+    <textarea id="prompt" maxlength="2000" rows="4" required>Explain server-sent events in two sentences.</textarea>
+    <button type="submit">Send</button>
+  </form>
+  <p id="status" role="status"></p>
+  <pre id="output"></pre>
+</main>
+<script type="module">
+  const form = document.querySelector('form');
+  const button = form.querySelector('button');
+  const prompt = document.querySelector('#prompt');
+  const output = document.querySelector('#output');
+  const status = document.querySelector('#status');
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (button.disabled || !prompt.value.trim()) return;
+    button.disabled = true;
+    output.textContent = '';
+    status.textContent = 'Connecting…';
+    let requestId;
+    try {
+      const response = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: prompt.value }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      requestId = response.headers.get('x-request-id');
+      status.textContent = 'Streaming…';
+      let pending = '';
+      let data = [];
+      let eventType = '';
+      let done = false;
+      for await (const text of response.body.pipeThrough(new TextDecoderStream())) {
+        pending += text;
+        let newline;
+        while ((newline = pending.indexOf('\n')) !== -1) {
+          const line = pending.slice(0, newline).replace(/\r$/, '');
+          pending = pending.slice(newline + 1);
+          if (line.startsWith('data:')) {
+            data.push(line.slice(5).replace(/^ /, ''));
+          } else if (line.startsWith('event:')) {
+            eventType = line.slice(6).trim();
+          } else if (!line) {
+            if (eventType === 'error') throw new Error('Hostlinku signaled a stream error.');
+            if (data.length) {
+              const payload = data.join('\n');
+              if (payload === '[DONE]') {
+                done = true;
+              } else {
+                const chunk = JSON.parse(payload);
+                if (chunk.error) throw new Error('Hostlinku could not complete the stream.');
+                output.textContent += chunk.choices?.[0]?.delta?.content ?? '';
+              }
+            }
+            data = [];
+            eventType = '';
+          }
+        }
+      }
+      if (!done) throw new Error('The stream ended before completion.');
+      status.textContent = output.textContent ? 'Complete.' : 'Complete with no text output.';
+    } catch (error) {
+      status.textContent = error.message + (requestId ? ' Request ID: ' + requestId : '');
+    } finally {
+      button.disabled = false;
+    }
+  });
+</script>
+</html>
